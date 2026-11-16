@@ -1,0 +1,56 @@
+newmtl Body white
+Kd 0.7200 0.7200 0.7000
+Ka 0 0 0
+Ks 0.0000 0.0000 0.0000
+Ns 85.0
+d 1.0
+illum 2
+
+newmtl Wing white
+Kd 0.6800 0.6800 0.6600
+Ka 0 0 0
+Ks 0.0000 0.0000 0.0000
+Ns 85.0
+d 1.0
+illum 2
+
+newmtl Seeker glass
+Kd 0.0200 0.0220 0.0260
+Ka 0 0 0
+Ks 0.0000 0.0000 0.0000
+Ns 30.0
+d 1.0
+illum 2
+
+newmtl Metal ring
+Kd 0.1000 0.1000 0.1100
+Ka 0 0 0
+Ks 0.8000 0.8000 0.8000
+Ns 45.0
+d 1.0
+illum 2
+
+newmtl Yellow band
+Kd 0.6200 0.5000 0.1000
+Ka 0 0 0
+Ks 0.0000 0.0000 0.0000
+Ns 75.0
+d 1.0
+illum 2
+
+newmtl Prop black
+Kd 0.0300 0.0300 0.0320
+Ka 0 0 0
+Ks 0.0000 0.0000 0.0000
+Ns 50.0
+d 1.0
+illum 2
+
+newmtl Detail dark
+Kd 0.1600 0.1600 0.1700
+Ka 0 0 0
+Ks 0.0000 0.0000 0.0000
+Ns 60.0
+d 1.0
+illum 2
+

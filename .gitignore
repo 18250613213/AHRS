@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+build/
+dist/
+*.log
+*.csv
+*.xlsx
+*.bin
+原始数据_*.txt
+.superpowers/

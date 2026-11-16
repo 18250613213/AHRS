@@ -1,0 +1,8 @@
+pyserial==3.5
+PyQt5==5.15.11
+numpy==2.4.6
+trimesh==5.2.1
+PyOpenGL==3.1.10
+Pillow==13.0.0
+openpyxl==3.1.5
+PyInstaller==6.20.0
