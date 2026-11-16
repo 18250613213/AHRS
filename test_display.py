@@ -5,8 +5,8 @@ import unittest
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from main import QApplication, MainWindow, BinaryFrameParser
-from t02v3 import T02V3Parser
-from test_t02v3 import SAMPLE
+from t02 import T02Parser
+from test_t02 import SAMPLE
 
 
 class DisplayTests(unittest.TestCase):
@@ -22,7 +22,7 @@ class DisplayTests(unittest.TestCase):
     def test_t02_display_and_export_preserve_axes(self):
         window = self.window
         window.protocol_combo.setCurrentIndex(0)
-        data = T02V3Parser.parse_frame(SAMPLE)
+        data = T02Parser.parse_frame(SAMPLE)
         window._update_ui(data)
         self.assertEqual(window.value_labels['velocity_up'].text(), '-0.0002')
         self.assertEqual(window.value_labels['latitude'].text(), '30.1234567')

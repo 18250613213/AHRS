@@ -13,7 +13,7 @@ if exist ".venv\Scripts\python.exe" set "AHRS_PYTHON=%~dp0.venv\Scripts\python.e
 
 echo.
 echo [2/3] 开始打包（这可能需要几分钟）...
-"%AHRS_PYTHON%" -m PyInstaller AHRS_T02V3.spec --workpath build\T02V3 --noconfirm
+"%AHRS_PYTHON%" -m PyInstaller AHRS_T02.spec --workpath build\T02 --noconfirm
 
 if %errorlevel% neq 0 (
     echo.
@@ -24,14 +24,14 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [3/3] 检查资源文件...
-if not exist "dist\AHRS_T02V3\_internal\3D model" (
+if not exist "dist\AHRS_T02\_internal\3D model" (
     echo [警告] 3D model 文件夹未正确包含，请检查打包配置
 )
 
 echo.
 echo ========================================
 echo 打包完成！
-echo 输出程序: dist\AHRS_T02V3\AHRS_T02V3.exe
+echo 输出程序: dist\AHRS_T02\AHRS_T02.exe
 echo ========================================
 echo.
 pause

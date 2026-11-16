@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from main import QApplication, MainWindow, SerialBinaryReader
-from t02v3 import T02V3Parser
-from test_t02v3 import SAMPLE
+from t02 import T02Parser
+from test_t02 import SAMPLE
 
 
 class ReliabilityTests(unittest.TestCase):
@@ -46,7 +46,7 @@ class ReliabilityTests(unittest.TestCase):
     def test_valid_data_timeout_zeroes_frequency_and_marks_values_stale(self):
         w = self.window
         w.reader = Mock(running=True, last_error='', raw_error='')
-        data = T02V3Parser.parse_frame(SAMPLE)
+        data = T02Parser.parse_frame(SAMPLE)
         w.on_data_received(data)
         w.rx_frequency = 200.0
         w.last_valid_time = time.perf_counter() - 3
@@ -59,7 +59,7 @@ class ReliabilityTests(unittest.TestCase):
     def test_close_persists_recording_without_export(self):
         w = self.window
         w.toggle_save()
-        w.on_data_received(T02V3Parser.parse_frame(SAMPLE))
+        w.on_data_received(T02Parser.parse_frame(SAMPLE))
         event = Mock()
         w.closeEvent(event)
         self.assertTrue(event.accept.called)
@@ -84,7 +84,7 @@ class ReliabilityTests(unittest.TestCase):
     def test_t02_burning_is_disabled_and_display_is_direct(self):
         w = self.window
         self.assertFalse(w.burn_file_btn.isEnabled())
-        first = T02V3Parser.parse_frame(SAMPLE)
+        first = T02Parser.parse_frame(SAMPLE)
         w._update_ui(first)
         second = dict(first, pitch=10.0)
         w._update_ui(second)

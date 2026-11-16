@@ -10,7 +10,7 @@ import numpy as np
 import trimesh
 from collections import deque
 from PIL import Image
-from t02v3 import T02V3Parser
+from t02 import T02Parser
 from recording import RecordingSession
 from version import APP_VERSION
 from decimal import Decimal, ROUND_HALF_UP, getcontext
@@ -622,7 +622,7 @@ class MainWindow(QMainWindow):
         config_layout.addWidget(baud_frame)
 
         self.protocol_combo = QComboBox()
-        self.protocol_combo.addItems(['T02V3 ($BDFPDL)', 'AHRS (EB90)'])
+        self.protocol_combo.addItems(['T02 ($BDFPDL)', 'AHRS (EB90)'])
         self.protocol_combo.setToolTip('选择与设备输出一致的协议')
         config_layout.addWidget(self.protocol_combo)
 
@@ -856,7 +856,7 @@ class MainWindow(QMainWindow):
 
     def _configure_protocol_fields(self):
         is_t02 = self.protocol_combo.currentIndex() == 0
-        groups = T02V3Parser.DISPLAY_GROUPS if is_t02 else self.legacy_display_groups
+        groups = T02Parser.DISPLAY_GROUPS if is_t02 else self.legacy_display_groups
         self.value_labels.clear()
         for rows, fields in zip(self.field_rows, groups):
             for index, (name_label, value_label) in enumerate(rows):
@@ -871,7 +871,7 @@ class MainWindow(QMainWindow):
         self.vendor_compat_check.setEnabled(not is_t02)
         self.vendor_compat_check.setToolTip('仅用于 EB90 二进制协议的弧度转角度')
         self.burn_file_btn.setEnabled(not is_t02 and not self._send_file_running)
-        self.burn_file_btn.setToolTip('T02V3 烧录协议尚未提供' if is_t02 else '旧设备写入流程，设备应答尚未验证')
+        self.burn_file_btn.setToolTip('T02 烧录协议尚未提供' if is_t02 else '旧设备写入流程，设备应答尚未验证')
         self._init_filter_queues()
 
     def _fill_serial_ports(self):
@@ -941,7 +941,7 @@ class MainWindow(QMainWindow):
         except ValueError:
             QMessageBox.warning(self, '警告', '波特率必须为 1 到 921600 的整数')
             return
-        parser = T02V3Parser if self.protocol_combo.currentIndex() == 0 else BinaryFrameParser
+        parser = T02Parser if self.protocol_combo.currentIndex() == 0 else BinaryFrameParser
         reader = SerialBinaryReader(port=port, baud_rate=baud, parser=parser)
         result = reader.open()
         if result is not True:
@@ -1111,7 +1111,7 @@ class MainWindow(QMainWindow):
                     elif key == 'gps_seconds':
                         label.setText(f"{value:.3f}")
                     elif key in ['alt_baro', 'alt_gps', 'alt']:
-                        label.setText(f"{value:.3f}" if data.get('protocol') == 'T02V3' else f"{value:.2f}")
+                        label.setText(f"{value:.3f}" if data.get('protocol') == 'T02' else f"{value:.2f}")
                     elif key == 'pitch':
                         label.setText(f"{value:.6f}")
                     elif key == 'roll':
@@ -1191,8 +1191,8 @@ class MainWindow(QMainWindow):
         return self.export_thread is not None and self.export_thread.is_alive()
 
     def _build_save_record(self, data):
-        if data.get('protocol') == 'T02V3':
-            record = {title: data[key] for group in T02V3Parser.DISPLAY_GROUPS
+        if data.get('protocol') == 'T02':
+            record = {title: data[key] for group in T02Parser.DISPLAY_GROUPS
                       for title, key in group}
             record['原始报文'] = data['raw_text']
             return record
@@ -1334,7 +1334,7 @@ class MainWindow(QMainWindow):
 
     def _on_burn_file(self):
         if self.protocol_combo.currentIndex() == 0:
-            QMessageBox.information(self, '暂不支持', '尚未提供 T02V3 的固件烧录协议')
+            QMessageBox.information(self, '暂不支持', '尚未提供 T02 的固件烧录协议')
             return
         reply = QMessageBox.question(
             self, '旧设备写入', '此流程没有设备应答校验。确认使用旧设备写入协议？',
@@ -1513,6 +1513,7 @@ class ModelLoader:
             "rotate_z": 0.0
         },
         "歼-20": {
+            "remove_detached": True,
             "axis_swap": [0, 2, 1],
             "flip_x": False,
             "flip_y": True,
@@ -1779,112 +1780,134 @@ class ModelLoader:
         return (normals / lengths).astype(np.float32)
 
     @staticmethod
+    def _remove_detached_parts(meshes):
+        # Weld positions across material seams for component analysis only.
+        vertices = np.vstack([mesh.vertices for mesh in meshes])
+        offsets = np.cumsum([0] + [len(mesh.vertices) for mesh in meshes])
+        faces = np.vstack([mesh.faces + offset for mesh, offset in zip(meshes, offsets)])
+        _, inverse = np.unique(np.round(vertices, 6), axis=0, return_inverse=True)
+        parent = np.arange(inverse.max() + 1)
+
+        def root(index):
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        for face in inverse[faces]:
+            first = root(face[0])
+            for index in face[1:]:
+                parent[root(index)] = first
+        labels = np.array([root(index) for index in inverse[faces[:, 0]]])
+        components = np.unique(labels)
+        triangles = vertices[faces]
+        areas = np.linalg.norm(np.cross(triangles[:, 1] - triangles[:, 0],
+                                       triangles[:, 2] - triangles[:, 0]), axis=1)
+        bounds = []
+        sizes = []
+        for component in components:
+            mask = labels == component
+            points = triangles[mask].reshape(-1, 3)
+            bounds.append([points.min(axis=0), points.max(axis=0)])
+            sizes.append(areas[mask].sum())
+        bounds = np.asarray(bounds)
+        tolerance = np.ptp(vertices, axis=0).max() * 0.001
+        kept = {int(np.argmax(sizes))}
+        pending = list(kept)
+        while pending:
+            current = pending.pop()
+            overlaps = np.all(bounds[:, 1] + tolerance >= bounds[current, 0], axis=1)
+            overlaps &= np.all(bounds[:, 0] - tolerance <= bounds[current, 1], axis=1)
+            for index in np.flatnonzero(overlaps):
+                if int(index) not in kept:
+                    kept.add(int(index))
+                    pending.append(int(index))
+        face_mask = np.isin(labels, components[sorted(kept)])
+        result = []
+        offset = 0
+        for mesh in meshes:
+            mask = face_mask[offset:offset + len(mesh.faces)]
+            offset += len(mesh.faces)
+            if mask.any():
+                mesh.update_faces(mask)
+                mesh.remove_unreferenced_vertices()
+                result.append(mesh)
+        return result
+
+    @staticmethod
     def _process_scene(scene, config, model_name):
-        submeshes = []
-        
-        total_faces = sum(len(g.faces) for g in scene.geometry.values() if isinstance(g, trimesh.Trimesh))
-        min_faces_threshold = 20
-        
-        bbox_volumes = []
-        for name, geom in scene.geometry.items():
-            if isinstance(geom, trimesh.Trimesh):
-                bbox_min = geom.vertices.min(axis=0)
-                bbox_max = geom.vertices.max(axis=0)
-                volume = np.prod(bbox_max - bbox_min)
-                bbox_volumes.append(volume)
-        
-        if bbox_volumes:
-            median_volume = np.median(bbox_volumes)
-            max_volume_threshold = median_volume * 1000
-        else:
-            max_volume_threshold = float('inf')
-
-        all_vertices = []
-
-        for geom in scene.geometry.values():
-            if isinstance(geom, trimesh.Trimesh):
-                face_count = len(geom.faces)
-                
-                bbox_min = geom.vertices.min(axis=0)
-                bbox_max = geom.vertices.max(axis=0)
-                volume = np.prod(bbox_max - bbox_min)
-                
-                keep = face_count >= min_faces_threshold and volume < max_volume_threshold
-                
-                if keep:
-                    all_vertices.append(geom.vertices)
-
-        if not all_vertices:
-            raise ValueError("Scene中没有找到有效的Trimesh对象")
-
-        main_verts = np.vstack(all_vertices)
-        center = main_verts.mean(axis=0)
-        max_dim = (main_verts.max(axis=0) - main_verts.min(axis=0)).max()
+        meshes = []
+        for node in scene.graph.nodes_geometry:
+            transform, geometry_name = scene.graph[node]
+            geometry = scene.geometry[geometry_name]
+            if isinstance(geometry, trimesh.Trimesh) and len(geometry.faces):
+                mesh = geometry.copy()
+                mesh.apply_transform(transform)
+                mesh.remove_unreferenced_vertices()
+                meshes.append(mesh)
+        if not meshes:
+            raise ValueError('Scene 中没有三角网格')
+        if config.get('remove_detached', False):
+            meshes = ModelLoader._remove_detached_parts(meshes)
+        main_verts = np.vstack([mesh.vertices for mesh in meshes])
+        center = (main_verts.max(axis=0) + main_verts.min(axis=0)) * 0.5
+        max_dim = np.ptp(main_verts, axis=0).max()
+        if max_dim <= 0:
+            raise ValueError('模型尺寸为零')
         scale = 6.0 / max_dim
-
-        for name, geom in scene.geometry.items():
-            if isinstance(geom, trimesh.Trimesh):
-                face_count = len(geom.faces)
-                bbox_min = geom.vertices.min(axis=0)
-                bbox_max = geom.vertices.max(axis=0)
-                volume = np.prod(bbox_max - bbox_min)
-                
-                keep = face_count >= min_faces_threshold and volume < max_volume_threshold
-                
-                if not keep:
-                    continue
-
-                vertices = geom.vertices.astype(np.float32)
-                vertices = (vertices - center) * scale
-                vertices = ModelLoader._apply_transforms(vertices, config)
-                
-                faces = geom.faces.astype(np.int32)
-                
-                uv = getattr(geom.visual, "uv", None)
-                
-                if uv is not None:
-                    uv = np.asarray(
-                        uv,
-                        dtype=np.float32
-                    )
-                
-                if config.get("remove_mirror", False):
-                    vertices, faces, uv = ModelLoader._filter_faces_by_axis(
-                        vertices=vertices,
-                        faces=faces,
-                        uv=uv,
-                        axis=int(config.get("mirror_axis", 1)),
-                        keep_positive=bool(
-                            config.get(
-                                "mirror_keep_positive",
-                                True
-                            )
-                        ),
-                        tolerance=float(
-                            config.get(
-                                "mirror_tolerance",
-                                0.05
-                            )
+        submeshes = []
+        for geom in meshes:
+            vertices = geom.vertices.astype(np.float32)
+            vertices = (vertices - center) * scale
+            vertices = ModelLoader._apply_transforms(vertices, config)
+            
+            faces = geom.faces.astype(np.int32)
+            
+            uv = getattr(geom.visual, "uv", None)
+            
+            if uv is not None:
+                uv = np.asarray(
+                    uv,
+                    dtype=np.float32
+                )
+            
+            if config.get("remove_mirror", False):
+                vertices, faces, uv = ModelLoader._filter_faces_by_axis(
+                    vertices=vertices,
+                    faces=faces,
+                    uv=uv,
+                    axis=int(config.get("mirror_axis", 1)),
+                    keep_positive=bool(
+                        config.get(
+                            "mirror_keep_positive",
+                            True
+                        )
+                    ),
+                    tolerance=float(
+                        config.get(
+                            "mirror_tolerance",
+                            0.05
                         )
                     )
-                
-                normals = ModelLoader._compute_vertex_normals(
-                    vertices,
-                    faces
                 )
-                
-                texture = ModelLoader._texture_image(geom)
+            
+            normals = ModelLoader._compute_vertex_normals(
+                vertices,
+                faces
+            )
+            
+            texture = ModelLoader._texture_image(geom)
 
-                color = ModelLoader._material_color(geom)
-                
-                submeshes.append({
-                    'vertices': vertices,
-                    'faces': faces,
-                    'normals': normals,
-                    'uv': uv,
-                    'texture': texture,
-                    'color': color
-                })
+            color = ModelLoader._material_color(geom)
+            
+            submeshes.append({
+                'vertices': vertices,
+                'faces': faces,
+                'normals': normals,
+                'uv': uv,
+                'texture': texture,
+                'color': color
+            })
 
         return {'submeshes': submeshes}
 

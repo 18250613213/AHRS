@@ -6,9 +6,9 @@ SAMPLE = b'$BDFPDL,2445,120970.000,269.99044,-0.38092,0.63102,30.1234567,120.123
 
 class ProtocolTests(unittest.TestCase):
     def setUp(self):
-        self.assertIsNotNone(importlib.util.find_spec('t02v3'), 'T02V3 parser is required')
-        from t02v3 import T02V3Parser
-        self.parser = T02V3Parser
+        self.assertIsNotNone(importlib.util.find_spec('t02'), 'T02 parser is required')
+        from t02 import T02Parser
+        self.parser = T02Parser
 
     def test_real_packet_fields_and_units(self):
         data = self.parser.parse_frame(SAMPLE)

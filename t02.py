@@ -1,8 +1,8 @@
-"""T02V3 $BDFPDL navigation sentences, angles in degrees and ENU velocity."""
+"""T02 $BDFPDL navigation sentences, angles in degrees and ENU velocity."""
 import math
 
 
-class T02V3Parser:
+class T02Parser:
     FRAME_HEADER = b'$BDFPDL,'
     MAX_FRAME_LENGTH = 1024
     FIELDS = (
@@ -44,9 +44,9 @@ class T02V3Parser:
                 buffer = buffer[next_start:]
                 continue
             if end < 0:
-                return frames, buffer if len(buffer) <= T02V3Parser.MAX_FRAME_LENGTH else b''
+                return frames, buffer if len(buffer) <= T02Parser.MAX_FRAME_LENGTH else b''
             line, buffer = buffer[:end + 1], buffer[end + 1:]
-            if line.startswith(T02V3Parser.FRAME_HEADER):
+            if line.startswith(T02Parser.FRAME_HEADER):
                 frames.append(line)
         return frames, buffer
 
@@ -54,7 +54,7 @@ class T02V3Parser:
     def parse_frame(frame):
         raw = frame.decode('ascii', errors='replace').strip()
         try:
-            if len(frame) > T02V3Parser.MAX_FRAME_LENGTH:
+            if len(frame) > T02Parser.MAX_FRAME_LENGTH:
                 raise ValueError('报文过长')
             text = frame.decode('ascii').strip()
             body, checksum_text = text[1:].split('*')
@@ -66,9 +66,9 @@ class T02V3Parser:
             if checksum != int(checksum_text, 16):
                 raise ValueError('异或校验和错误')
             fields = body.split(',')[1:]
-            if len(fields) != len(T02V3Parser.FIELDS):
+            if len(fields) != len(T02Parser.FIELDS):
                 raise ValueError(f'需要23个数据字段，收到{len(fields)}个')
-            data = {key: convert(value) for (key, convert), value in zip(T02V3Parser.FIELDS, fields)}
+            data = {key: convert(value) for (key, convert), value in zip(T02Parser.FIELDS, fields)}
             if not all(math.isfinite(value) for value in data.values()):
                 raise ValueError('包含非有限数值')
             for key, low, high in [('pitch', -90, 90), ('roll', -180, 180),
@@ -76,11 +76,11 @@ class T02V3Parser:
                                    ('longitude', -180, 180), ('gps_seconds', 0, 604800)]:
                 if not low <= data[key] <= high:
                     raise ValueError(f'{key}超出范围')
-            for key, convert in T02V3Parser.FIELDS:
+            for key, convert in T02Parser.FIELDS:
                 if convert is int and data[key] < 0:
                     raise ValueError(f'{key}不能为负数')
-            data.update(protocol='T02V3', frame_header='$BDFPDL', raw_text=raw,
+            data.update(protocol='T02', frame_header='$BDFPDL', raw_text=raw,
                         raw_hex=' '.join(f'{byte:02X}' for byte in frame))
             return data
         except (ValueError, UnicodeError, OverflowError) as error:
-            return {'error': f'T02V3解析失败: {error}', 'raw_text': raw}
+            return {'error': f'T02解析失败: {error}', 'raw_text': raw}
