@@ -1,4 +1,5 @@
 """COM15 mode negotiation and incremental UBX/NMEA monitoring."""
+import queue
 import threading
 import time
 from collections import Counter
@@ -77,8 +78,14 @@ class MixedParser:
 
 
 class RS232Reader:
-    def __init__(self, port, serial_factory=serial.Serial):
+    def __init__(self, port, serial_factory=serial.Serial, uart=1):
+        if uart not in (0, 1, 2):
+            raise ValueError("UART 必须是 0、1 或 2")
         self.port = port
+        self.uart = uart
+        self.active_uart = None
+        self.busy = True
+        self.commands = queue.Queue(maxsize=1)
         self.serial_factory = serial_factory
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
@@ -120,50 +127,96 @@ class RS232Reader:
                 self.last_received = time.monotonic()
         return bool(messages)
 
+    def request_mode(self, uart):
+        if uart not in (None, 0, 1, 2):
+            raise ValueError('UART 必须是 0、1 或 2')
+        with self.lock:
+            if self.busy or self.stop_event.is_set() or not self.thread or not self.thread.is_alive():
+                return False
+            self.busy = True
+            self.commands.put_nowait(uart)
+        return True
+
+    @staticmethod
+    def _send(port, command):
+        if port.write(command) != len(command):
+            raise OSError('串口命令写入不完整')
+        port.flush()
+
+    def _clear_data(self):
+        with self.lock:
+            self.latest.clear()
+            self.counts.clear()
+            self.errors = 0
+            self.last_received = None
+
+    def _exit_uart(self, port):
+        self._state('460800 — 发送 exit…')
+        port.baudrate = 460800
+        self._send(port, b'exit\r')
+        self.active_uart = None
+        self._clear_data()
+        if self.stop_event.wait(.5):
+            return
+        port.reset_input_buffer()
+        self._state('exit 已发送；460800 命令通道，可选择 UART 后进入')
+
+    def _enter_uart(self, port, uart):
+        # Re-establish command mode even after reconnecting to a silent UART.
+        self._exit_uart(port)
+        if self.stop_event.is_set():
+            return
+        self._state(f'460800 — 发送 debug，准备进入 UART{uart}…')
+        self._send(port, b'debug\r')
+        response = b''
+        deadline = time.monotonic() + 4
+        while not self.stop_event.is_set() and time.monotonic() < deadline:
+            response = (response + port.read(port.in_waiting or 1))[-4096:]
+            if b'debug mode' in response.lower():
+                break
+        if self.stop_event.is_set():
+            return
+        if b'debug mode' not in response.lower():
+            self._state('未收到 Debug mode 应答；可重试进入或发送 exit')
+            return
+        self._state(f'Debug mode 已确认；发送 uart {uart}…')
+        self._send(port, f'uart {uart}\r'.encode('ascii'))
+        if self.stop_event.wait(.1):
+            return
+        port.baudrate = 230400
+        self.active_uart = uart
+        self._state(f'UART{uart} 指令已发送 — 230400 等待数据（该通道可能无输出）')
+
     def _run(self):
         try:
-            with self.serial_factory(self.port, 230400, timeout=.1, write_timeout=1) as port:
-                self._state('检测 230400 混合输出…')
+            with self.serial_factory(self.port, 460800, timeout=.1, write_timeout=1) as port:
+                self._enter_uart(port, self.uart)
+                self.busy = False
                 parser = MixedParser()
-                deadline = time.monotonic() + 1.5
-                detected = False
-                while not self.stop_event.is_set() and time.monotonic() < deadline:
-                    if self._consume(parser, port.read(port.in_waiting or 1)):
-                        detected = True
-                        break
-                if not detected and not self.stop_event.is_set():
-                    port.baudrate = 460800
-                    port.reset_input_buffer()
-                    self._state('460800 — 发送 debug，等待 Debug mode…')
-                    if port.write(b'debug\r') != 6:
-                        raise OSError('debug 指令写入不完整')
-                    port.flush()
-                    response = b''
-                    deadline = time.monotonic() + 4
-                    while not self.stop_event.is_set() and time.monotonic() < deadline:
-                        response = (response + port.read(port.in_waiting or 1))[-4096:]
-                        if b'debug mode' in response.lower():
-                            break
-                    if self.stop_event.is_set():
-                        return
-                    if b'debug mode' not in response.lower():
-                        raise TimeoutError('未收到 Debug mode，请检查端口及设备状态')
-                    self._state('发送 uart 1，切换到 230400…')
-                    if port.write(b'uart 1\r') != 7:
-                        raise OSError('uart 1 指令写入不完整')
-                    port.flush()
-                    if self.stop_event.wait(.1):
-                        return
-                    port.baudrate = 230400
-                    parser = MixedParser()
-                self._state('230400 — 接收 UBX + NMEA')
                 while not self.stop_event.is_set():
-                    self._consume(parser, port.read(port.in_waiting or 1))
+                    try:
+                        command = self.commands.get_nowait()
+                    except queue.Empty:
+                        command = 'receive'
+                    if command != 'receive':
+                        try:
+                            if command is None:
+                                self._exit_uart(port)
+                            else:
+                                self._enter_uart(port, command)
+                        finally:
+                            self.busy = False
+                        parser = MixedParser()
+                        continue
+                    data = port.read(port.in_waiting or 1)
+                    if self.active_uart is not None and self._consume(parser, data):
+                        self._state(f'UART{self.active_uart} — 230400 接收 UBX + NMEA')
         except Exception as error:
             self._state(f'连接失败／已断开 — {error}')
         finally:
+            self.busy = False
             if self.stop_event.is_set():
-                self._state('已关闭')
+                self._state('已关闭串口')
 
 
 class RS232Panel(QGroupBox):
@@ -178,12 +231,26 @@ class RS232Panel(QGroupBox):
         self.port_combo.setCurrentText('COM15')
         self.button = QPushButton('打开 RS232')
         self.button.clicked.connect(self.toggle)
+        self.uart_combo = QComboBox()
+        self.uart_combo.addItems(['UART0', 'UART1', 'UART2'])
+        self.uart_combo.setCurrentIndex(1)
+        self.enter_button = QPushButton('进入 UART')
+        self.enter_button.clicked.connect(self.enter_uart)
+        self.exit_button = QPushButton('退出 UART')
+        self.exit_button.clicked.connect(self.exit_uart)
+        self.enter_button.setEnabled(False)
+        self.exit_button.setEnabled(False)
         self.message_combo = QComboBox()
         controls.addWidget(self.port_combo)
         controls.addWidget(self.button)
+        controls.addWidget(self.uart_combo)
+        controls.addWidget(self.enter_button)
+        controls.addWidget(self.exit_button)
+        layout.addLayout(controls)
+        controls = QHBoxLayout()
         controls.addWidget(self.message_combo, 1)
         layout.addLayout(controls)
-        self.status = QLabel('460800 发送 debug / uart 1 → 230400 接收')
+        self.status = QLabel('选择 UART 后打开；exit 返回命令通道，无输出也可退出')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.summary = QLabel('等待定位报文')
@@ -201,7 +268,7 @@ class RS232Panel(QGroupBox):
         if self.reader and self.reader.thread and self.reader.thread.is_alive():
             self.shutdown()
             return
-        self.reader = RS232Reader(self.port_combo.currentText().strip())
+        self.reader = RS232Reader(self.port_combo.currentText().strip(), uart=self.uart_combo.currentIndex())
         self.message_combo.clear()
         self.details.clear()
         self.summary.setText('等待定位报文')
@@ -209,18 +276,37 @@ class RS232Panel(QGroupBox):
         self.button.setText('关闭 RS232')
         self.reader.start()
 
+    def enter_uart(self):
+        if self.reader:
+            self.reader.request_mode(self.uart_combo.currentIndex())
+            self.refresh()
+
+    def exit_uart(self):
+        if self.reader:
+            self.reader.request_mode(None)
+            self.refresh()
+
     def shutdown(self):
         if self.reader and not self.reader.stop():
             self.status.setText('正在关闭串口，请稍后重试')
             return False
         self.port_combo.setEnabled(True)
         self.button.setText('打开 RS232')
+        self.enter_button.setEnabled(False)
+        self.exit_button.setEnabled(False)
         return True
 
     def refresh(self):
         if not self.reader:
             return
         state, latest, counts, errors, last_received = self.reader.snapshot()
+        connected = bool(self.reader.thread and self.reader.thread.is_alive())
+        self.enter_button.setEnabled(connected and not self.reader.busy)
+        self.exit_button.setEnabled(connected and not self.reader.busy)
+        if not latest:
+            self.message_combo.clear()
+            self.details.clear()
+            self.summary.setText('当前通道暂无定位报文')
         now = time.monotonic()
         age = now - last_received if last_received is not None else None
         stale = '；等待有效数据' if age is None else f'；最后接收 {age:.1f}s 前'

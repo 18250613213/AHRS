@@ -56,8 +56,29 @@ class MixedTests(unittest.TestCase):
         ticks = iter(i * .5 for i in range(100))
         with patch('rs232.time.monotonic', side_effect=lambda: next(ticks)):
             reader._run()
-        self.assertEqual(writes, [(460800, b'debug\r'), (460800, b'uart 1\r')])
+        self.assertEqual(writes, [(460800, b'exit\r'), (460800, b'debug\r'), (460800, b'uart 1\r')])
         self.assertEqual(reader.counts['NAV-PVT'], 1)
+
+    def test_silent_modes_can_exit(self):
+        from rs232 import RS232Reader
+        from unittest.mock import Mock
+        for uart in (0, 1, 2):
+            with self.subTest(uart=uart):
+                port = Mock()
+                port.in_waiting = 0
+                port.read.return_value = b'Debug mode=>\r\n'
+                port.write.side_effect = len
+                reader = RS232Reader('COM15', uart=uart)
+                reader._enter_uart(port, uart)
+                self.assertEqual(reader.active_uart, uart)
+                self.assertEqual(port.baudrate, 230400)
+                self.assertEqual(reader.counts, {})
+                self.assertIn('可能无输出', reader.state)
+                self.assertEqual(port.write.call_args.args[0], f'uart {uart}\r'.encode())
+                reader._exit_uart(port)
+                self.assertIsNone(reader.active_uart)
+                self.assertEqual(port.baudrate, 460800)
+                self.assertEqual(port.write.call_args.args[0], b'exit\r')
 
     def test_panel_displays_pvt_fields(self):
         from PyQt5.QtWidgets import QApplication
