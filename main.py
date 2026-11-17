@@ -20,7 +20,7 @@ getcontext().prec = 28
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QComboBox, QPushButton, QCheckBox, QTextEdit,
                              QGroupBox, QGridLayout, QMessageBox, QOpenGLWidget, QSizePolicy,
-                             QFileDialog, QProgressBar)
+                             QFileDialog, QProgressBar, QSplitter)
 from PyQt5.QtCore import Qt, QTimer, QPointF, QCoreApplication, QMetaObject, Q_ARG, pyqtSignal
 from PyQt5.QtGui import (QFont, QPainter, QPen, QBrush, QColor, QPolygonF,
                          QVector3D, QQuaternion, QMatrix4x4)
@@ -674,7 +674,7 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(config_group)
 
-        file_group = QGroupBox("文件传输")
+        file_group = QGroupBox("文件传输", self)
         file_layout = QHBoxLayout(file_group)
         file_layout.setSpacing(5)
         file_layout.setContentsMargins(10, 10, 10, 10)
@@ -707,22 +707,27 @@ class MainWindow(QMainWindow):
         self.send_status_label.setFixedWidth(120)
         file_layout.addWidget(self.send_status_label)
 
-        main_layout.addWidget(file_group)
+        # Retain legacy transfer hooks, but remove their controls from the UI.
+        file_group.hide()
 
         plane_group = QGroupBox("飞机姿态")
         plane_layout = QVBoxLayout(plane_group)
         self.plane_widget = PlaneGLWidget()
-        self.plane_widget.setFixedHeight(190)
+        self.plane_widget.setMinimumHeight(240)
         plane_layout.addWidget(self.plane_widget)
-        attitude_row = QHBoxLayout()
-        attitude_row.addWidget(plane_group, 2)
+        attitude_row = QSplitter(Qt.Horizontal)
+        attitude_row.setChildrenCollapsible(False)
+        attitude_row.addWidget(plane_group)
         self.rs232_panel = RS232Panel()
-        attitude_row.addWidget(self.rs232_panel, 3)
-        main_layout.addLayout(attitude_row)
+        attitude_row.addWidget(self.rs232_panel)
+        attitude_row.setStretchFactor(0, 2)
+        attitude_row.setStretchFactor(1, 3)
+        attitude_row.setSizes([450, 750])
+        main_layout.addWidget(attitude_row, 1)
 
         self.smoothing_check = QCheckBox('平滑三维姿态（有显示延迟）')
         self.smoothing_check.toggled.connect(self._init_filter_queues)
-        main_layout.addWidget(self.smoothing_check)
+        plane_layout.addWidget(self.smoothing_check)
 
         parsed_group = QGroupBox("解析数据")
         parsed_layout = QHBoxLayout(parsed_group)

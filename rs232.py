@@ -1,5 +1,7 @@
 """COM15 mode negotiation and incremental UBX/NMEA monitoring."""
 import queue
+import os
+from pathlib import Path
 import threading
 import time
 from collections import Counter
@@ -9,7 +11,60 @@ from serial.tools import list_ports
 from pyubx2 import UBXReader
 from pynmeagps import NMEAReader
 from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QTextEdit
+from PyQt5.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QTextEdit, QFileDialog, QMessageBox
+
+
+class RawRecording:
+    """Thread-safe, bounded-memory capture of received bytes before parsing."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.file = None
+        self.path = ''
+        self.size = 0
+        self.error = ''
+
+    def start(self, path):
+        with self.lock:
+            if self.file:
+                raise RuntimeError('正在保存')
+            self.file = open(path, 'wb')
+            self.path, self.size, self.error = str(path), 0, ''
+
+    def _close(self):
+        handle, self.file = self.file, None
+        if handle:
+            try:
+                handle.flush()
+                os.fsync(handle.fileno())
+            except OSError as error:
+                self.error = str(error)
+            finally:
+                try:
+                    handle.close()
+                except OSError as error:
+                    self.error = str(error)
+
+    def stop(self):
+        with self.lock:
+            self._close()
+
+    def append(self, data):
+        with self.lock:
+            if not self.file or not data:
+                return
+            try:
+                written = self.file.write(data)
+                self.file.flush()
+                self.size += written
+                if written != len(data):
+                    raise OSError('原始数据写入不完整')
+            except OSError as error:
+                self.error = str(error)
+                self._close()
+
+    def snapshot(self):
+        with self.lock:
+            return self.file is not None, self.path, self.size, self.error
 
 
 class MixedParser:
@@ -95,6 +150,7 @@ class RS232Reader:
         self.counts = Counter()
         self.errors = 0
         self.last_received = None
+        self.recording = RawRecording()
 
     def start(self):
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -115,6 +171,7 @@ class RS232Reader:
             return self.state, dict(self.latest), dict(self.counts), self.errors, self.last_received
 
     def _consume(self, parser, data):
+        self.recording.append(data)
         messages = parser.feed(data)
         with self.lock:
             self.errors = parser.errors
@@ -214,6 +271,7 @@ class RS232Reader:
         except Exception as error:
             self._state(f'连接失败／已断开 — {error}')
         finally:
+            self.recording.stop()
             self.busy = False
             if self.stop_event.is_set():
                 self._state('已关闭串口')
@@ -221,7 +279,7 @@ class RS232Reader:
 
 class RS232Panel(QGroupBox):
     def __init__(self):
-        super().__init__('RS232 — UBX / NMEA')
+        super().__init__('卫导数据')
         self.reader = None
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
@@ -247,6 +305,14 @@ class RS232Panel(QGroupBox):
         controls.addWidget(self.enter_button)
         controls.addWidget(self.exit_button)
         layout.addLayout(controls)
+        recording_row = QHBoxLayout()
+        self.save_button = QPushButton('保存原始数据')
+        self.save_button.setEnabled(False)
+        self.save_button.clicked.connect(self.toggle_recording)
+        recording_row.addWidget(self.save_button)
+        self.recording_status = QLabel('未保存 · UBX / NMEA 原始字节流')
+        recording_row.addWidget(self.recording_status, 1)
+        layout.addLayout(recording_row)
         controls = QHBoxLayout()
         controls.addWidget(self.message_combo, 1)
         layout.addLayout(controls)
@@ -258,11 +324,32 @@ class RS232Panel(QGroupBox):
         layout.addWidget(self.summary)
         self.details = QTextEdit()
         self.details.setReadOnly(True)
-        self.details.setMinimumHeight(90)
+        self.details.setMinimumHeight(130)
         layout.addWidget(self.details)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(200)
+
+    def toggle_recording(self):
+        if not self.reader:
+            return
+        if self.reader.recording.snapshot()[0]:
+            self.reader.recording.stop()
+        else:
+            filename = str(Path.home() / f'卫导原始数据_{time.strftime("%Y%m%d_%H%M%S")}.bin')
+            path, _ = QFileDialog.getSaveFileName(self, '保存卫导原始数据', filename, '二进制原始数据 (*.bin)')
+            if not path:
+                return
+            if not Path(path).suffix:
+                path += '.bin'
+            # The port may disconnect while the file dialog is open.
+            if not self.reader.thread or not self.reader.thread.is_alive():
+                return
+            try:
+                self.reader.recording.start(path)
+            except OSError as error:
+                QMessageBox.critical(self, '保存失败', str(error))
+        self.refresh()
 
     def toggle(self):
         if self.reader and self.reader.thread and self.reader.thread.is_alive():
@@ -294,6 +381,8 @@ class RS232Panel(QGroupBox):
         self.button.setText('打开 RS232')
         self.enter_button.setEnabled(False)
         self.exit_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        self.refresh()
         return True
 
     def refresh(self):
@@ -301,6 +390,18 @@ class RS232Panel(QGroupBox):
             return
         state, latest, counts, errors, last_received = self.reader.snapshot()
         connected = bool(self.reader.thread and self.reader.thread.is_alive())
+        active, path, size, error = self.reader.recording.snapshot()
+        if active and not connected:
+            self.reader.recording.stop()
+            active, path, size, error = self.reader.recording.snapshot()
+        self.save_button.setEnabled(connected or active)
+        self.save_button.setText('停止保存' if active else '保存原始数据')
+        if path:
+            state_text = '保存失败：' + error if error else ('正在保存' if active else '已保存')
+            self.recording_status.setText(f'{state_text} · {size:,} 字节 · {Path(path).name}')
+            self.recording_status.setToolTip(path + ('\n' + error if error else ''))
+        else:
+            self.recording_status.setText('未保存 · UBX / NMEA 原始字节流')
         self.enter_button.setEnabled(connected and not self.reader.busy)
         self.exit_button.setEnabled(connected and not self.reader.busy)
         if not latest:

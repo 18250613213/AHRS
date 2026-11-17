@@ -2,6 +2,8 @@ import unittest
 import struct
 import os
 import time
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from rs232 import MixedParser
@@ -23,6 +25,34 @@ NMEA = b'$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n'
 
 
 class MixedTests(unittest.TestCase):
+    def test_raw_capture_preserves_noise_corruption_and_split_frames(self):
+        from rs232 import RS232Reader
+        reader = RS232Reader('COM15')
+        stream = b'noise\x00\xff' + ubx_packet() + NMEA + b'$bad*00\r\n'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'raw.bin'
+            reader.recording.start(path)
+            parser = MixedParser()
+            for i in range(0, len(stream), 7):
+                reader._consume(parser, stream[i:i+7])
+            reader.recording.stop()
+            reader._consume(parser, NMEA)
+            self.assertEqual(path.read_bytes(), stream)
+            self.assertEqual(reader.recording.snapshot(), (False, str(path), len(stream), ''))
+
+    def test_raw_disk_failure_does_not_stop_parsing(self):
+        from rs232 import RS232Reader
+        from unittest.mock import Mock
+        reader = RS232Reader('COM15')
+        handle = Mock()
+        handle.write.side_effect = OSError('disk full')
+        reader.recording.file = handle
+        with patch('rs232.os.fsync'):
+            self.assertTrue(reader._consume(MixedParser(), NMEA))
+        self.assertIn('disk full', reader.recording.snapshot()[3])
+        self.assertFalse(reader.recording.snapshot()[0])
+        handle.close.assert_called_once()
+
     def test_corrupt_length_recovers_after_timeout(self):
         parser = MixedParser()
         parser.feed(b'\xb5\x62\x01\x07\xff\xff' + NMEA)
@@ -54,8 +84,13 @@ class MixedTests(unittest.TestCase):
                 if self.baudrate != 230400: raise AssertionError('incorrect receive baud')
         reader = RS232Reader('COM15', serial_factory=lambda *args, **kwargs: Port())
         ticks = iter(i * .5 for i in range(100))
-        with patch('rs232.time.monotonic', side_effect=lambda: next(ticks)):
-            reader._run()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'capture.bin'
+            reader.recording.start(path)
+            with patch('rs232.time.monotonic', side_effect=lambda: next(ticks)):
+                reader._run()
+            self.assertFalse(reader.recording.snapshot()[0])
+            self.assertEqual(path.read_bytes(), ubx_packet())
         self.assertEqual(writes, [(460800, b'exit\r'), (460800, b'debug\r'), (460800, b'uart 1\r')])
         self.assertEqual(reader.counts['NAV-PVT'], 1)
 
