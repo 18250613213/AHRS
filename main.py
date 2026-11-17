@@ -13,6 +13,7 @@ from PIL import Image
 from t02 import T02Parser
 from recording import RecordingSession
 from version import APP_VERSION
+from rs232 import RS232Panel
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 getcontext().prec = 28
 
@@ -711,9 +712,13 @@ class MainWindow(QMainWindow):
         plane_group = QGroupBox("飞机姿态")
         plane_layout = QVBoxLayout(plane_group)
         self.plane_widget = PlaneGLWidget()
-        self.plane_widget.setFixedHeight(250)
+        self.plane_widget.setFixedHeight(190)
         plane_layout.addWidget(self.plane_widget)
-        main_layout.addWidget(plane_group)
+        attitude_row = QHBoxLayout()
+        attitude_row.addWidget(plane_group, 2)
+        self.rs232_panel = RS232Panel()
+        attitude_row.addWidget(self.rs232_panel, 3)
+        main_layout.addLayout(attitude_row)
 
         self.smoothing_check = QCheckBox('平滑三维姿态（有显示延迟）')
         self.smoothing_check.toggled.connect(self._init_filter_queues)
@@ -1446,6 +1451,9 @@ class MainWindow(QMainWindow):
             self.send_status_label.setText('正在取消，等待当前写入结束')
 
     def closeEvent(self, event):
+        if not self.rs232_panel.shutdown():
+            event.ignore()
+            return
         if self._send_file_running:
             self._closing = True
             self._close_pending = True

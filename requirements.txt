@@ -6,3 +6,6 @@ PyOpenGL==3.1.10
 Pillow==13.0.0
 openpyxl==3.1.5
 PyInstaller==6.20.0
+pyubx2==1.4.1
+pynmeagps==1.1.9
+pyrtcm==1.2.1
