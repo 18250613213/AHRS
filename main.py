@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QGroupBox, QGridLayout, QMessageBox, QOpenGLWidget, QSizePolicy,
                              QFileDialog, QProgressBar, QSplitter)
 from PyQt5.QtCore import Qt, QTimer, QPointF, QCoreApplication, QMetaObject, Q_ARG, pyqtSignal
-from PyQt5.QtGui import (QFont, QPainter, QPen, QBrush, QColor, QPolygonF,
+from PyQt5.QtGui import (QIcon, QFont, QPainter, QPen, QBrush, QColor, QPolygonF,
                          QVector3D, QQuaternion, QMatrix4x4)
 from OpenGL.GL import *
 from OpenGL.GLU import *
@@ -536,6 +536,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"AHRS 数据解析器 V{APP_VERSION}")
+        self.setWindowIcon(QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'ahrs.ico')))
         self.setGeometry(100, 100, 1200, 800)
 
         self.reader = None
@@ -2518,7 +2519,11 @@ class PlaneGLWidget(QOpenGLWidget):
 
 
 def main():
+    if sys.platform == 'win32':
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('AHRS.T02.Desktop')
     app = QApplication(sys.argv)
+    app.setApplicationVersion(APP_VERSION)
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())

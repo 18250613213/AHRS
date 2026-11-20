@@ -1,0 +1,13 @@
+VSVersionInfo(
+    ffi=FixedFileInfo(filevers=(0, 2, 0, 0), prodvers=(0, 2, 0, 0),
+                     mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1,
+                     subtype=0x0, date=(0, 0)),
+    kids=[StringFileInfo([StringTable('080404B0', [
+        StringStruct('FileDescription', 'AHRS 姿态与卫导数据解析器'),
+        StringStruct('FileVersion', '0.2.0.0'),
+        StringStruct('InternalName', 'AHRS_T02'),
+        StringStruct('OriginalFilename', 'AHRS_T02.exe'),
+        StringStruct('ProductName', 'AHRS T02'),
+        StringStruct('ProductVersion', '0.2.0.0')
+    ])]), VarFileInfo([VarStruct('Translation', [2052, 1200])])]
+)

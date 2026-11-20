@@ -1,6 +1,6 @@
 # AHRS
 
-## V0.1
+## V0.2
 
 Windows AHRS 串口数据解析和三维姿态显示工具，支持 T02 `$BDFPDL` 和 EB90 二进制协议。
 
