@@ -521,8 +521,12 @@ class SerialBinaryReader:
 class ReviewModel(QAbstractTableModel):
     def __init__(self, rows, parent):
         super().__init__(parent)
-        self.rows = rows
-        self.headers = list(rows[0])
+        first = next(rows, None)
+        if first is None:
+            raise ValueError("文件没有数据行")
+        self.headers = list(first)
+        self.rows = [tuple(first.values())]
+        self.rows.extend(tuple(row.get(key) for key in self.headers) for row in rows)
 
     def rowCount(self, parent=QModelIndex()):
         return len(self.rows)
@@ -532,7 +536,7 @@ class ReviewModel(QAbstractTableModel):
 
     def data(self, index, role):
         if role == Qt.DisplayRole and index.isValid():
-            value = self.rows[index.row()].get(self.headers[index.column()])
+            value = self.rows[index.row()][index.column()]
             return "" if value is None else str(value)
 
     def headerData(self, section, orientation, role):
@@ -964,24 +968,35 @@ class MainWindow(QMainWindow):
                                               "数据文件 (*.csv *.xlsx *.txt)")
         if not path:
             return
-        try:
-            rows = list(review_rows(path, self.test_mode, self.test_limits,
-                                    make_record=self._build_save_record))
-            if not rows:
-                raise ValueError("文件没有数据行")
-        except Exception as error:
-            QMessageBox.warning(self, "无法读取记录", str(error))
-            return
         dialog = QDialog(self)
         dialog.setWindowTitle("测验回顾 — " + os.path.basename(path))
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel(f"共 {len(rows)} 帧"))
         table = QTableView()
-        model = ReviewModel(rows, table)
+        skipped = 0
+        examples = []
+
+        def report_invalid(message):
+            nonlocal skipped
+            skipped += 1
+            if len(examples) < 5:
+                examples.append(message)
+
+        try:
+            rows = review_rows(path, self.test_mode, self.test_limits,
+                               make_record=self._build_save_record, on_invalid=report_invalid)
+            model = ReviewModel(rows, table)
+        except Exception as error:
+            dialog.deleteLater()
+            QMessageBox.warning(self, "无法读取记录", str(error))
+            return
+        layout.addWidget(QLabel(f"共 {model.rowCount()} 帧，跳过 {skipped} 行"))
+        if examples:
+            layout.addWidget(QLabel("\n".join(examples)))
         table.setModel(model)
         layout.addWidget(table)
         dialog.resize(1100, 600)
         dialog.exec_()
+        dialog.deleteLater()
 
 
     def _configure_protocol_fields(self):

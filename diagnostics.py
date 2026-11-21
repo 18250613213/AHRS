@@ -52,7 +52,7 @@ class Diagnostics:
         return result
 
 
-def text_records(path, make_record):
+def text_records(path, make_record, on_invalid):
     from t02 import T02Parser
 
     with open(path, "rb") as source:
@@ -67,6 +67,7 @@ def text_records(path, make_record):
                 yield from csv.DictReader((line for line in table if line.strip()), delimiter=delimiter)
             return
         found = False
+        first_error = None
         for number, line in enumerate(source, 1):
             if number == 1:
                 line = line.removeprefix(b"\xef\xbb\xbf")
@@ -75,16 +76,24 @@ def text_records(path, make_record):
                 raise ValueError(f"第 {number} 行第 {index + 1} 字节超出 ASCII 范围，请选择设备输出的 ASCII 明文记录")
             if not line.strip():
                 continue
-            data = T02Parser.parse_frame(line.strip())
+            frame = line.strip()
+            if frame.startswith(b'"') and frame.endswith(b'"'):
+                frame = frame[1:-1]
+            data = T02Parser.parse_frame(frame)
             if "error" in data:
-                raise ValueError(f"第 {number} 行：{data['error']}，需要 $BDFPDL 明文报文")
+                reason = "报文不完整，缺少校验字段" if frame.startswith(T02Parser.FRAME_HEADER) and b"*" not in frame else data["error"]
+                message = f"第 {number} 行：{reason}"
+                first_error = first_error or message
+                if on_invalid:
+                    on_invalid(message)
+                continue
             found = True
-            yield make_record(data)
+            yield {"源文件行号": number, **make_record(data)}
         if not found:
-            raise ValueError("文件没有 ASCII 报文")
+            raise ValueError(first_error or "文件没有 ASCII 报文")
 
 
-def review_rows(path, mode, limits, *, make_record=None):
+def review_rows(path, mode, limits, *, make_record=None, on_invalid=None):
     diagnostic = Diagnostics()
 
     def analyze(row):
@@ -102,7 +111,7 @@ def review_rows(path, mode, limits, *, make_record=None):
         return {**row, **diagnostic.update(data, stamp, mode, limits)}
 
     if Path(path).suffix.lower() == ".txt":
-        for row in text_records(path, make_record):
+        for row in text_records(path, make_record, on_invalid):
             yield analyze(row)
     elif Path(path).suffix.lower() == ".xlsx":
         book = load_workbook(path, read_only=True, data_only=True)

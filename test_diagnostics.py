@@ -58,3 +58,21 @@ class DiagnosticTests(unittest.TestCase):
                     read()
             path.write_text("经度(°)\t纬度(°)\t高度(m)\n120\t30\t5", encoding="utf-8-sig")
             self.assertEqual(read()[0]["高度判定"], "待判定")
+
+    def test_quoted_capture_keeps_valid_rows_and_reports_corruption(self):
+        from main import MainWindow
+        from test_t02 import SAMPLE
+        frame = SAMPLE.strip()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "drive.txt"
+            path.write_bytes(b"\r\n".join(
+                b'"' + payload + b'"' for payload in
+                (frame, frame[:-2] + b"FF", frame, frame[:20])))
+            errors = []
+            rows = list(review_rows(path, "运动", (3, 3, 5),
+                                    make_record=lambda d: MainWindow._build_save_record(None, d),
+                                    on_invalid=errors.append))
+            self.assertEqual([r["源文件行号"] for r in rows], [1, 3])
+            self.assertEqual(rows[-1]["系统状态字统计"], "48×2")
+            self.assertIn("第 2 行", errors[0])
+            self.assertIn("第 4 行", errors[1])
