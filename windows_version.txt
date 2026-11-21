@@ -8,6 +8,6 @@ VSVersionInfo(
         StringStruct('InternalName', 'AHRS_T02'),
         StringStruct('OriginalFilename', 'AHRS_T02.exe'),
         StringStruct('ProductName', 'AHRS T02'),
-        StringStruct('ProductVersion', '0.2.0.0')
+        StringStruct('ProductVersion', '0.2-test-diagnostics')
     ])]), VarFileInfo([VarStruct('Translation', [2052, 1200])])]
 )
