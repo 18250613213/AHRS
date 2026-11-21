@@ -374,7 +374,7 @@ class BinaryFrameParser:
 
 
 class SerialBinaryReader:
-    def __init__(self, port='COM3', baud_rate=9600, timeout=0.01, parser=BinaryFrameParser):
+    def __init__(self, port='COM3', baud_rate=9600, timeout=0.01, parser=T02Parser):
         self.parser = parser
         self.port = port
         self.baud_rate = baud_rate
@@ -388,9 +388,7 @@ class SerialBinaryReader:
 
         self.raw_lock = threading.Lock()
         self.raw_file = None
-        self.raw_mode = None
         self.raw_path = ''
-        self.raw_hex_pending = bytearray()
         self.raw_bytes_written = 0
 
     def open(self):
@@ -460,28 +458,25 @@ class SerialBinaryReader:
             self.running = False
 
     def write_data(self, data):
+        if not data.isascii():
+            raise ValueError("只能发送 ASCII 数据")
         if self.serial_port and self.serial_port.is_open:
             written = self.serial_port.write(data)
             self.serial_port.flush()
             return written == len(data)
         return False
 
-    def start_raw_record(self, path, mode='hex'):
+    def start_raw_record(self, path):
         with self.raw_lock:
             if self.raw_file is not None:
                 return '已在记录中'
             try:
-                if mode == 'bin':
-                    self.raw_file = open(path, 'wb')
-                else:
-                    self.raw_file = open(path, 'w', encoding='ascii', newline='\n')
+                self.raw_file = open(path, 'wb')
             except OSError as e:
                 self.raw_file = None
                 return str(e)
-            self.raw_mode = mode
             self.raw_error = ''
             self.raw_path = path
-            self.raw_hex_pending = bytearray()
             self.raw_bytes_written = 0
             return True
 
@@ -490,17 +485,12 @@ class SerialBinaryReader:
             if self.raw_file is None:
                 return
             try:
-                if self.raw_mode == 'bin':
-                    self.raw_file.write(data)
-                else:
-                    self.raw_hex_pending.extend(data)
-                    while len(self.raw_hex_pending) >= 32:
-                        chunk = bytes(self.raw_hex_pending[:32])
-                        del self.raw_hex_pending[:32]
-                        self.raw_file.write(' '.join(f'{b:02X}' for b in chunk) + '\n')
+                if not data.isascii():
+                    raise ValueError("收到非 ASCII 字节，已停止原始记录")
+                self.raw_file.write(data)
                 self.raw_bytes_written += len(data)
                 self.raw_file.flush()
-            except OSError as error:
+            except (OSError, ValueError) as error:
                 self.raw_error = f'原始录制失败: {error}'
                 try:
                     self.raw_file.close()
@@ -515,8 +505,6 @@ class SerialBinaryReader:
             path = self.raw_path
             size = self.raw_bytes_written
             try:
-                if self.raw_mode == 'hex' and self.raw_hex_pending:
-                    self.raw_file.write(' '.join(f'{b:02X}' for b in self.raw_hex_pending) + '\n')
                 self.raw_file.flush()
             except OSError as error:
                 self.raw_error = f'原始录制结束失败: {error}'
@@ -525,9 +513,7 @@ class SerialBinaryReader:
             except OSError as error:
                 self.raw_error = f'原始录制关闭失败: {error}'
             self.raw_file = None
-            self.raw_mode = None
             self.raw_path = ''
-            self.raw_hex_pending = bytearray()
             self.raw_bytes_written = 0
             return path, size
 
@@ -656,7 +642,7 @@ class MainWindow(QMainWindow):
         config_layout.addWidget(baud_frame)
 
         self.protocol_combo = QComboBox()
-        self.protocol_combo.addItems(['T02 ($BDFPDL)', 'AHRS (EB90)'])
+        self.protocol_combo.addItem("T02 ($BDFPDL ASCII)")
         self.protocol_combo.setToolTip('选择与设备输出一致的协议')
         config_layout.addWidget(self.protocol_combo)
 
@@ -680,15 +666,10 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         config_layout.addWidget(self.export_btn)
 
-        self.hex_display_check = QCheckBox("十六进制显示")
-        self.hex_display_check.setChecked(True)
-        self.hex_display_check.toggled.connect(self._refresh_raw_preview)
-        config_layout.addWidget(self.hex_display_check)
-
         self.vendor_compat_check = QCheckBox("厂家角度兼容")
         self.vendor_compat_check.setChecked(BinaryFrameParser.USE_VENDOR_ANGLE_CONVERSION)
         self.vendor_compat_check.stateChanged.connect(self._on_vendor_compat_changed)
-        config_layout.addWidget(self.vendor_compat_check)
+        self.vendor_compat_check.hide()
 
         model_frame = QWidget()
         model_layout = QHBoxLayout(model_frame)
@@ -718,7 +699,7 @@ class MainWindow(QMainWindow):
 
         self.burn_file_btn = QPushButton("烧录文件")
         self.burn_file_btn.clicked.connect(self._on_burn_file)
-        file_layout.addWidget(self.burn_file_btn)
+        self.burn_file_btn.hide()
 
         self.cancel_send_btn = QPushButton("取消")
         self.cancel_send_btn.clicked.connect(self._on_cancel_send)
@@ -886,7 +867,7 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.status_label)
 
         self.raw_save_btn = QPushButton("保存原始数据")
-        self.raw_save_btn.setToolTip("把串口收到的原始字节写入 TXT(十六进制) 或 BIN 文件")
+        self.raw_save_btn.setToolTip("将 ASCII 原始报文原样保存为 TXT")
         self.raw_save_btn.clicked.connect(self.toggle_raw_record)
         status_layout.addWidget(self.raw_save_btn)
 
@@ -985,7 +966,6 @@ class MainWindow(QMainWindow):
             return
         try:
             rows = list(review_rows(path, self.test_mode, self.test_limits,
-                                    parsers=(T02Parser, BinaryFrameParser),
                                     make_record=self._build_save_record))
             if not rows:
                 raise ValueError("文件没有数据行")
@@ -1307,8 +1287,6 @@ class MainWindow(QMainWindow):
                         label.setText(f"{int(value)}")
                     else:
                         label.setText(f"{value:.4f}")
-                elif key in ('system_state', 'flight_state'):
-                    label.setText(f'{value} (0x{value:X})')
                 else:
                     label.setText(str(value))
             else:
@@ -1320,7 +1298,7 @@ class MainWindow(QMainWindow):
         if self.last_frame is None or not hasattr(self, 'raw_preview'):
             return
         data = self.last_frame
-        text = data.get('raw_hex', '') if self.hex_display_check.isChecked() else data.get('raw_text', data.get('raw_hex', ''))
+        text = data.get('raw_text', '')
         self.raw_preview.setPlainText(text)
 
     def toggle_save(self):
@@ -1464,25 +1442,22 @@ class MainWindow(QMainWindow):
 
         reader = self.reader
         filename = f"原始数据_{time.strftime('%Y_%m_%d_%H-%M-%S')}.txt"
-        path, selected_filter = QFileDialog.getSaveFileName(
+        path, _ = QFileDialog.getSaveFileName(
             self,
             "保存原始数据",
             os.path.join(self._default_raw_dir(), filename),
-            "十六进制文本 (*.txt);;二进制文件 (*.bin)"
+            "ASCII 明文 (*.txt)"
         )
         if not path:
             return
 
-        ext = os.path.splitext(path)[1].lower()
-        if not ext:
-            ext = '.bin' if '二进制' in selected_filter else '.txt'
-            path += ext
-        mode = 'bin' if ext == '.bin' else 'hex'
+        if not path.lower().endswith('.txt'):
+            path += '.txt'
 
         if self.reader is not reader or not reader.running:
             QMessageBox.warning(self, '连接已断开', '请重新连接串口后开始记录')
             return
-        result = reader.start_raw_record(path, mode)
+        result = reader.start_raw_record(path)
         if result is not True:
             QMessageBox.critical(self, "保存失败", f"无法创建文件:\n{result}")
             return
@@ -1525,7 +1500,7 @@ class MainWindow(QMainWindow):
         if not reader or not reader.running or not reader.serial_port or not reader.serial_port.is_open:
             QMessageBox.warning(self, '提示', '请先打开串口并启动接收')
             return
-        path, _ = QFileDialog.getOpenFileName(self, '选择文件', '', '所有文件 (*.*)')
+        path, _ = QFileDialog.getOpenFileName(self, '选择文件', '', 'ASCII 文本 (*.txt *.log *.csv);;所有文件 (*.*)')
         if not path:
             return
         if os.path.getsize(path) == 0:
@@ -1558,6 +1533,9 @@ class MainWindow(QMainWindow):
         message = ''
         progress = 0
         try:
+            with open(file_path, "rb") as check:
+                if any(not block.isascii() for block in iter(lambda: check.read(65536), b"")):
+                    raise ValueError("文件包含非 ASCII 字节，无法发送")
             reader.stop_receiving()
             total = os.path.getsize(file_path)
             if total == 0:

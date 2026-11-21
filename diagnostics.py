@@ -52,40 +52,39 @@ class Diagnostics:
         return result
 
 
-def text_records(path, parsers, make_record):
-    with open(path, encoding="utf-8-sig", newline="") as source:
-        first = next((line.strip() for line in source if line.strip()), "")
+def text_records(path, make_record):
+    from t02 import T02Parser
+
+    with open(path, "rb") as source:
+        first = next((line for line in source if line.strip()), b"")
         source.seek(0)
         if not first:
             return
-        if "经度(°)" in first:
-            delimiter = "\t" if "\t" in first else ","
-            yield from csv.DictReader((line for line in source if line.strip()), delimiter=delimiter)
+        if "经度(°)".encode() in first:
+            import io
+            with io.TextIOWrapper(source, encoding="utf-8-sig", newline="") as table:
+                delimiter = "\t" if b"\t" in first else ","
+                yield from csv.DictReader((line for line in table if line.strip()), delimiter=delimiter)
             return
-
-        plain = first.startswith("$")
-        buffers = {parser: b"" for parser in parsers}
-        matched = None
+        found = False
         for number, line in enumerate(source, 1):
-            try:
-                chunk = (line.rstrip("\r\n").encode("ascii") + b"\n"
-                         if plain else bytes.fromhex(line))
-            except ValueError as error:
-                raise ValueError(f"第 {number} 行无法识别，请使用十六进制原始记录、T02 报文或带表头的数据表") from error
-            for parser in ([matched] if matched else parsers):
-                frames, buffers[parser] = parser.find_frames(buffers[parser] + chunk)
-                for frame in frames:
-                    data = parser.parse_frame(frame)
-                    if "error" not in data:
-                        matched = parser
-                        yield make_record(data)
-                if matched:
-                    break
-        if not matched:
-            raise ValueError("文件中没有通过校验的 T02 或 EB90 导航帧")
+            if number == 1:
+                line = line.removeprefix(b"\xef\xbb\xbf")
+            if not line.isascii():
+                index = next(i for i, value in enumerate(line) if value > 127)
+                raise ValueError(f"第 {number} 行第 {index + 1} 字节超出 ASCII 范围，请选择设备输出的 ASCII 明文记录")
+            if not line.strip():
+                continue
+            data = T02Parser.parse_frame(line.strip())
+            if "error" in data:
+                raise ValueError(f"第 {number} 行：{data['error']}，需要 $BDFPDL 明文报文")
+            found = True
+            yield make_record(data)
+        if not found:
+            raise ValueError("文件没有 ASCII 报文")
 
 
-def review_rows(path, mode, limits, *, parsers=(), make_record=None):
+def review_rows(path, mode, limits, *, make_record=None):
     diagnostic = Diagnostics()
 
     def analyze(row):
@@ -103,7 +102,7 @@ def review_rows(path, mode, limits, *, parsers=(), make_record=None):
         return {**row, **diagnostic.update(data, stamp, mode, limits)}
 
     if Path(path).suffix.lower() == ".txt":
-        for row in text_records(path, parsers, make_record):
+        for row in text_records(path, make_record):
             yield analyze(row)
     elif Path(path).suffix.lower() == ".xlsx":
         book = load_workbook(path, read_only=True, data_only=True)

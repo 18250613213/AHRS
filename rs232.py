@@ -1,4 +1,4 @@
-"""COM15 mode negotiation and incremental UBX/NMEA monitoring."""
+"""COM15 mode negotiation and incremental ASCII NMEA monitoring."""
 import queue
 import os
 from pathlib import Path
@@ -8,7 +8,6 @@ from collections import Counter
 
 import serial
 from serial.tools import list_ports
-from pyubx2 import UBXReader
 from pynmeagps import NMEAReader
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QTextEdit, QFileDialog, QMessageBox
@@ -53,12 +52,14 @@ class RawRecording:
             if not self.file or not data:
                 return
             try:
+                if not data.isascii():
+                    raise ValueError("收到非 ASCII 字节，已停止原始记录")
                 written = self.file.write(data)
                 self.file.flush()
                 self.size += written
                 if written != len(data):
                     raise OSError('原始数据写入不完整')
-            except OSError as error:
+            except (ValueError, OSError) as error:
                 self.error = str(error)
                 self._close()
 
@@ -76,46 +77,34 @@ class MixedParser:
     def feed(self, data):
         now = time.monotonic()
         if self.buffer and self.pending_since is not None and now - self.pending_since > 2:
-            self.buffer = self.buffer[2:] if self.buffer.startswith(b'\xb5\x62') else self.buffer[1:]
+            self.buffer = self.buffer[1:]
             self.errors += 1
             self.pending_since = None
         self.buffer += data
         messages = []
         while self.buffer:
-            candidates = [index for index in (self.buffer.find(b'\xb5\x62'), self.buffer.find(b'$')) if index >= 0]
-            if not candidates:
-                self.buffer = b'\xb5' if self.buffer.endswith(b'\xb5') else b''
+            start = self.buffer.find(b'$')
+            if start < 0:
+                self.buffer = b''
                 break
-            self.buffer = self.buffer[min(candidates):]
-            is_ubx = self.buffer.startswith(b'\xb5\x62')
-            if is_ubx:
-                if len(self.buffer) < 6:
-                    break
-                size = int.from_bytes(self.buffer[4:6], 'little') + 8
-                if size > 65543:
-                    self.buffer = self.buffer[2:]
+            self.buffer = self.buffer[start:]
+            end = self.buffer.find(b'\n')
+            following = self.buffer.find(b'$', 1)
+            if following >= 0 and (end < 0 or following < end):
+                self.buffer = self.buffer[following:]
+                self.errors += 1
+                continue
+            if end < 0:
+                if len(self.buffer) > 4096:
+                    self.buffer = b''
                     self.errors += 1
-                    continue
-                if len(self.buffer) < size:
-                    break
-            else:
-                end = self.buffer.find(b'\n')
-                next_start = self.buffer.find(b'$', 1)
-                ubx_start = self.buffer.find(b'\xb5\x62', 1)
-                starts = [i for i in (next_start, ubx_start) if i >= 0]
-                if starts and (end < 0 or min(starts) < end):
-                    self.buffer = self.buffer[min(starts):]
-                    self.errors += 1
-                    continue
-                if end < 0:
-                    if len(self.buffer) > 4096:
-                        self.buffer = b''
-                        self.errors += 1
-                    break
-                size = end + 1
+                break
+            size = end + 1
             raw = self.buffer[:size]
             try:
-                parsed = UBXReader.parse(raw) if is_ubx else NMEAReader.parse(raw)
+                if not raw.isascii():
+                    raise ValueError('非 ASCII 报文')
+                parsed = NMEAReader.parse(raw)
                 if parsed is None:
                     raise ValueError('空报文')
                 messages.append((raw, parsed))
@@ -124,7 +113,7 @@ class MixedParser:
             except Exception:
                 self.errors += 1
                 # Rescan after a corrupt length/checksum instead of swallowing a following frame.
-                self.buffer = self.buffer[2:] if is_ubx else self.buffer[size:]
+                self.buffer = self.buffer[size:]
         if self.buffer and self.pending_since is None:
             self.pending_since = now
         if not self.buffer:
@@ -267,7 +256,7 @@ class RS232Reader:
                         continue
                     data = port.read(port.in_waiting or 1)
                     if self.active_uart is not None and self._consume(parser, data):
-                        self._state(f'UART{self.active_uart} — 230400 接收 UBX + NMEA')
+                        self._state(f'UART{self.active_uart} — 230400 接收 ASCII NMEA')
         except Exception as error:
             self._state(f'连接失败／已断开 — {error}')
         finally:
@@ -310,7 +299,7 @@ class RS232Panel(QGroupBox):
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self.toggle_recording)
         recording_row.addWidget(self.save_button)
-        self.recording_status = QLabel('未保存 · UBX / NMEA 原始字节流')
+        self.recording_status = QLabel('未保存 · ASCII NMEA 明文')
         recording_row.addWidget(self.recording_status, 1)
         layout.addLayout(recording_row)
         controls = QHBoxLayout()
@@ -336,12 +325,12 @@ class RS232Panel(QGroupBox):
         if self.reader.recording.snapshot()[0]:
             self.reader.recording.stop()
         else:
-            filename = str(Path.home() / f'卫导原始数据_{time.strftime("%Y%m%d_%H%M%S")}.bin')
-            path, _ = QFileDialog.getSaveFileName(self, '保存卫导原始数据', filename, '二进制原始数据 (*.bin)')
+            filename = str(Path.home() / f'卫导原始数据_{time.strftime("%Y%m%d_%H%M%S")}.txt')
+            path, _ = QFileDialog.getSaveFileName(self, '保存卫导原始数据', filename, 'ASCII 明文 (*.txt)')
             if not path:
                 return
-            if not Path(path).suffix:
-                path += '.bin'
+            if Path(path).suffix.lower() != '.txt':
+                path += '.txt'
             # The port may disconnect while the file dialog is open.
             if not self.reader.thread or not self.reader.thread.is_alive():
                 return
@@ -401,7 +390,7 @@ class RS232Panel(QGroupBox):
             self.recording_status.setText(f'{state_text} · {size:,} 字节 · {Path(path).name}')
             self.recording_status.setToolTip(path + ('\n' + error if error else ''))
         else:
-            self.recording_status.setText('未保存 · UBX / NMEA 原始字节流')
+            self.recording_status.setText('未保存 · ASCII NMEA 明文')
         self.enter_button.setEnabled(connected and not self.reader.busy)
         self.exit_button.setEnabled(connected and not self.reader.busy)
         if not latest:
@@ -420,18 +409,16 @@ class RS232Panel(QGroupBox):
         for identity in latest:
             if self.message_combo.findText(identity) < 0:
                 self.message_combo.addItem(identity)
-        nav = latest.get('NAV-PVT')
-        if nav:
-            _, msg, timestamp = nav
-            self.summary.setText(
-                f'NAV-PVT | 经度 {msg.lon:.7f}° 纬度 {msg.lat:.7f}° '
-                f'海拔 {msg.hMSL / 1000:.3f}m | 卫星 {msg.numSV} '
-                f'fixType={msg.fixType} 有效={msg.gnssFixOk} | {now - timestamp:.1f}s 前')
+        fixes = [entry for key, entry in latest.items() if key.endswith("GGA")]
+        if fixes:
+            _, msg, timestamp = max(fixes, key=lambda entry: entry[2])
+            self.summary.setText(f"{msg.identity} | 经度 {msg.lon}° 纬度 {msg.lat}° "
+                                 f"海拔 {msg.alt} m | 卫星 {msg.numSV} | {now - timestamp:.1f}s 前")
         selected = latest.get(self.message_combo.currentText())
         if selected:
             raw, msg, timestamp = selected
             fields = [f'{key} = {value}' for key, value in vars(msg).items() if not key.startswith('_')]
-            raw_text = raw.hex(' ').upper() if raw.startswith(b'\xb5\x62') else raw.decode('ascii', errors='replace').strip()
+            raw_text = raw.decode('ascii').strip()
             text = f'{msg.identity} | {counts[msg.identity]} 条 | {now - timestamp:.1f}s 前\n'
             text += '\n'.join(fields) + '\n原始报文\n' + raw_text
             scroll = self.details.verticalScrollBar().value()

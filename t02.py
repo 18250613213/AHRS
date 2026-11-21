@@ -79,8 +79,7 @@ class T02Parser:
             for key, convert in T02Parser.FIELDS:
                 if convert is int and data[key] < 0:
                     raise ValueError(f'{key}不能为负数')
-            data.update(protocol='T02', frame_header='$BDFPDL', raw_text=raw,
-                        raw_hex=' '.join(f'{byte:02X}' for byte in frame))
+            data.update(protocol='T02', frame_header='$BDFPDL', raw_text=raw)
             return data
         except (ValueError, UnicodeError, OverflowError) as error:
             return {'error': f'T02解析失败: {error}', 'raw_text': raw}

@@ -26,20 +26,17 @@ class DisplayTests(unittest.TestCase):
         window._update_ui(data)
         self.assertEqual(window.value_labels['velocity_up'].text(), '-0.0002')
         self.assertEqual(window.value_labels['latitude'].text(), '30.1234567')
-        self.assertEqual(window.value_labels['system_state'].text(), '48 (0x30)')
+        self.assertEqual(window.value_labels['system_state'].text(), '48')
         record = window._build_save_record(data)
         self.assertEqual(record['天向速度(m/s)'], -.0002)
         self.assertEqual(record['X轴角速率(°/s)'], .029)
         self.assertEqual(len(record), 25)  # 23 fields, protocol, original sentence
 
-    def test_protocol_switch_rebinds_legacy_fields(self):
+    def test_ascii_protocol_and_preview(self):
         window = self.window
-        window.protocol_combo.setCurrentIndex(1)
-        self.assertIn('velocity_z', window.value_labels)
-        self.assertNotIn('velocity_up', window.value_labels)
-        self.assertTrue(window.vendor_compat_check.isEnabled())
-        window.protocol_combo.setCurrentIndex(0)
-        self.assertFalse(window.vendor_compat_check.isEnabled())
+        self.assertEqual(window.protocol_combo.count(), 1)
+        window._update_ui(T02Parser.parse_frame(SAMPLE))
+        self.assertEqual(window.raw_preview.toPlainText(), SAMPLE.decode('ascii').strip())
 
     def test_yaw_filter_crosses_north_without_half_turn(self):
         window = self.window

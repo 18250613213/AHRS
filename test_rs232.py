@@ -28,7 +28,7 @@ class MixedTests(unittest.TestCase):
     def test_raw_capture_preserves_noise_corruption_and_split_frames(self):
         from rs232 import RS232Reader
         reader = RS232Reader('COM15')
-        stream = b'noise\x00\xff' + ubx_packet() + NMEA + b'$bad*00\r\n'
+        stream = b'noise' + NMEA + b'$bad*00\r\n'
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'raw.bin'
             reader.recording.start(path)
@@ -55,9 +55,9 @@ class MixedTests(unittest.TestCase):
 
     def test_corrupt_length_recovers_after_timeout(self):
         parser = MixedParser()
-        parser.feed(b'\xb5\x62\x01\x07\xff\xff' + NMEA)
+        parser.feed(b'$partial')
         parser.pending_since = time.monotonic() - 3
-        result = parser.feed(b'')
+        result = parser.feed(NMEA)
         self.assertEqual(result[0][1].identity, 'GPGGA')
 
     def test_mode_commands_and_baud_change(self):
@@ -77,7 +77,7 @@ class MixedTests(unittest.TestCase):
                 if writes and writes[-1][1] == b'uart 1\r':
                     self.assert_baud()
                     reader.stop_event.set()
-                    return ubx_packet()
+                    return NMEA
                 if writes: return b'Debug mode=>\r\n'
                 return b''
             def assert_baud(self):
@@ -90,9 +90,9 @@ class MixedTests(unittest.TestCase):
             with patch('rs232.time.monotonic', side_effect=lambda: next(ticks)):
                 reader._run()
             self.assertFalse(reader.recording.snapshot()[0])
-            self.assertEqual(path.read_bytes(), ubx_packet())
+            self.assertEqual(path.read_bytes(), NMEA)
         self.assertEqual(writes, [(460800, b'exit\r'), (460800, b'debug\r'), (460800, b'uart 1\r')])
-        self.assertEqual(reader.counts['NAV-PVT'], 1)
+        self.assertEqual(reader.counts['GPGGA'], 1)
 
     def test_silent_modes_can_exit(self):
         from rs232 import RS232Reader
@@ -121,10 +121,10 @@ class MixedTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         panel = RS232Panel()
         panel.reader = RS232Reader('COM15')
-        panel.reader._consume(MixedParser(), ubx_packet())
+        panel.reader._consume(MixedParser(), NMEA)
         panel.refresh()
-        self.assertIn('120.1234567', panel.summary.text())
-        self.assertIn('lon = 120.1234567', panel.details.toPlainText())
+        self.assertIn('11.516', panel.summary.text())
+        self.assertIn('lon = 11.516', panel.details.toPlainText())
         panel.timer.stop()
         panel.close()
 
@@ -133,13 +133,12 @@ class MixedTests(unittest.TestCase):
         for index in range(len(stream)):
             parser = MixedParser()
             messages = parser.feed(stream[:index]) + parser.feed(stream[index:])
-            self.assertEqual([m[1].identity for m in messages], ['NAV-PVT', 'GPGGA'])
-            self.assertAlmostEqual(messages[0][1].lon, 120.1234567)
-            self.assertAlmostEqual(messages[1][1].lat, 48.1173)
+            self.assertEqual([m[1].identity for m in messages], ['GPGGA'])
+            self.assertAlmostEqual(messages[0][1].lon, 11.5166666667)
+            self.assertAlmostEqual(messages[0][1].lat, 48.1173)
 
     def test_bad_checksum_recovers(self):
-        packet = bytearray(ubx_packet())
-        packet[-1] ^= 1
+        packet = NMEA.replace(b"*47", b"*00")
         parser = MixedParser()
         messages = parser.feed(bytes(packet) + NMEA)
         self.assertEqual(len(messages), 1)
