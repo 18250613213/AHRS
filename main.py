@@ -980,11 +980,13 @@ class MainWindow(QMainWindow):
 
     def _review_test(self):
         path, _ = QFileDialog.getOpenFileName(self, "回顾采集或测验记录", "",
-                                              "数据文件 (*.csv *.xlsx)")
+                                              "数据文件 (*.csv *.xlsx *.txt)")
         if not path:
             return
         try:
-            rows = list(review_rows(path, self.test_mode, self.test_limits))
+            rows = list(review_rows(path, self.test_mode, self.test_limits,
+                                    parsers=(T02Parser, BinaryFrameParser),
+                                    make_record=self._build_save_record))
             if not rows:
                 raise ValueError("文件没有数据行")
         except Exception as error:
