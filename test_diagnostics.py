@@ -52,10 +52,14 @@ class DiagnosticTests(unittest.TestCase):
             reader.stop_raw_record()
             self.assertEqual(path.read_bytes(), raw)
             self.assertEqual(read()[-1]["系统状态字统计"], "48×2")
-            for invalid in (raw.hex(" ").encode(), b"\x80" + raw):
+            for invalid in (raw.hex(" ").encode(), b"\x80\xff"):
                 path.write_bytes(invalid)
                 with self.assertRaises(ValueError):
                     read()
+            path.write_bytes(b"\x80\xf8" + SAMPLE + SAMPLE[:40] + SAMPLE)
+            recovered = read()
+            self.assertEqual([r["源文件行号"] for r in recovered], [1, 2])
+            self.assertEqual(recovered[-1]["系统状态字统计"], "48×2")
             path.write_text("经度(°)\t纬度(°)\t高度(m)\n120\t30\t5", encoding="utf-8-sig")
             self.assertEqual(read()[0]["高度判定"], "待判定")
 

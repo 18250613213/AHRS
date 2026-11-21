@@ -1,5 +1,9 @@
 import serial
 from serial.tools import list_ports
+import pickle
+import tempfile
+import zlib
+from itertools import chain, islice
 import threading
 import time
 import os
@@ -14,7 +18,7 @@ from t02 import T02Parser
 from datetime import datetime
 from diagnostics import Diagnostics, AXES, TYPES, review_rows
 from PyQt5.QtCore import QSettings, QAbstractTableModel, QModelIndex
-from PyQt5.QtWidgets import QDialog, QTableView, QDoubleSpinBox
+from PyQt5.QtWidgets import QProgressDialog, QDialog, QTableView, QDoubleSpinBox
 from recording import RecordingSession
 from version import APP_VERSION
 from rs232 import RS232Panel
@@ -519,24 +523,46 @@ class SerialBinaryReader:
 
 
 class ReviewModel(QAbstractTableModel):
-    def __init__(self, rows, parent):
+    def __init__(self, rows, parent, progress=None):
         super().__init__(parent)
         first = next(rows, None)
         if first is None:
             raise ValueError("文件没有数据行")
         self.headers = list(first)
-        self.rows = [tuple(first.values())]
-        self.rows.extend(tuple(row.get(key) for key in self.headers) for row in rows)
+        self.page_size = 512
+        self.offsets = []
+        self.count = 0
+        self.cached_page = -1
+        self.cache = tempfile.TemporaryFile()
+        records = (tuple(row.get(key) for key in self.headers) for row in chain((first,), rows))
+        try:
+            while page := list(islice(records, self.page_size)):
+                self.offsets.append(self.cache.tell())
+                self.cache.write(zlib.compress(pickle.dumps(page, protocol=5), level=1))
+                self.count += len(page)
+                if progress:
+                    progress(self.count)
+        except Exception:
+            self.cache.close()
+            raise
+        self.offsets.append(self.cache.tell())
+        self.destroyed.connect(lambda _=None, cache=self.cache: cache.close())
 
     def rowCount(self, parent=QModelIndex()):
-        return len(self.rows)
+        return self.count
 
     def columnCount(self, parent=QModelIndex()):
         return len(self.headers)
 
     def data(self, index, role):
         if role == Qt.DisplayRole and index.isValid():
-            value = self.rows[index.row()][index.column()]
+            page, row = divmod(index.row(), self.page_size)
+            if page != self.cached_page:
+                self.cache.seek(self.offsets[page])
+                size = self.offsets[page + 1] - self.offsets[page]
+                self.page = pickle.loads(zlib.decompress(self.cache.read(size)))
+                self.cached_page = page
+            value = self.page[row][index.column()]
             return "" if value is None else str(value)
 
     def headerData(self, section, orientation, role):
@@ -968,6 +994,9 @@ class MainWindow(QMainWindow):
                                               "数据文件 (*.csv *.xlsx *.txt)")
         if not path:
             return
+        self._review_file(path)
+
+    def _review_file(self, path):
         dialog = QDialog(self)
         dialog.setWindowTitle("测验回顾 — " + os.path.basename(path))
         layout = QVBoxLayout(dialog)
@@ -981,15 +1010,32 @@ class MainWindow(QMainWindow):
             if len(examples) < 5:
                 examples.append(message)
 
+        progress = QProgressDialog("正在读取记录…", "取消", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        def update_progress(count):
+            progress.setLabelText(f"已读取 {count:,} 帧")
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                raise InterruptedError()
+
         try:
             rows = review_rows(path, self.test_mode, self.test_limits,
                                make_record=self._build_save_record, on_invalid=report_invalid)
-            model = ReviewModel(rows, table)
+            model = ReviewModel(rows, table, update_progress)
+        except InterruptedError:
+            dialog.deleteLater()
+            return
         except Exception as error:
             dialog.deleteLater()
             QMessageBox.warning(self, "无法读取记录", str(error))
             return
-        layout.addWidget(QLabel(f"共 {model.rowCount()} 帧，跳过 {skipped} 行"))
+        finally:
+            progress.close()
+            progress.deleteLater()
+        layout.addWidget(QLabel(f"共 {model.rowCount()} 帧，跳过 {skipped} 处异常数据"))
         if examples:
             layout.addWidget(QLabel("\n".join(examples)))
         table.setModel(model)

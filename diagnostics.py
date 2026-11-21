@@ -71,24 +71,29 @@ def text_records(path, make_record, on_invalid):
         for number, line in enumerate(source, 1):
             if number == 1:
                 line = line.removeprefix(b"\xef\xbb\xbf")
-            if not line.isascii():
-                index = next(i for i, value in enumerate(line) if value > 127)
-                raise ValueError(f"第 {number} 行第 {index + 1} 字节超出 ASCII 范围，请选择设备输出的 ASCII 明文记录")
-            if not line.strip():
-                continue
             frame = line.strip()
+            if not frame:
+                continue
             if frame.startswith(b'"') and frame.endswith(b'"'):
                 frame = frame[1:-1]
-            data = T02Parser.parse_frame(frame)
-            if "error" in data:
-                reason = "报文不完整，缺少校验字段" if frame.startswith(T02Parser.FRAME_HEADER) and b"*" not in frame else data["error"]
-                message = f"第 {number} 行：{reason}"
+            header = T02Parser.FRAME_HEADER
+            prefix, *parts = frame.split(header)
+            if prefix:
+                message = f"第 {number} 行：跳过 {len(prefix)} 字节无帧头数据"
                 first_error = first_error or message
                 if on_invalid:
                     on_invalid(message)
-                continue
-            found = True
-            yield {"源文件行号": number, **make_record(data)}
+            for part in parts:
+                data = T02Parser.parse_frame(header + part)
+                if "error" in data:
+                    reason = "报文不完整，缺少校验字段" if b"*" not in part else data["error"]
+                    message = f"第 {number} 行：{reason}"
+                    first_error = first_error or message
+                    if on_invalid:
+                        on_invalid(message)
+                    continue
+                found = True
+                yield {"源文件行号": number, **make_record(data)}
         if not found:
             raise ValueError(first_error or "文件没有 ASCII 报文")
 
