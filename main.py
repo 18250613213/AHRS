@@ -11,6 +11,10 @@ import trimesh
 from collections import deque
 from PIL import Image
 from t02 import T02Parser
+from datetime import datetime
+from diagnostics import Diagnostics, AXES, TYPES, review_rows
+from PyQt5.QtCore import QSettings, QAbstractTableModel, QModelIndex
+from PyQt5.QtWidgets import QDialog, QTableView, QDoubleSpinBox
 from recording import RecordingSession
 from version import APP_VERSION
 from rs232 import RS232Panel
@@ -528,6 +532,28 @@ class SerialBinaryReader:
             return path, size
 
 
+class ReviewModel(QAbstractTableModel):
+    def __init__(self, rows, parent):
+        super().__init__(parent)
+        self.rows = rows
+        self.headers = list(rows[0])
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self.rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self.headers)
+
+    def data(self, index, role):
+        if role == Qt.DisplayRole and index.isValid():
+            value = self.rows[index.row()].get(self.headers[index.column()])
+            return "" if value is None else str(value)
+
+    def headerData(self, section, orientation, role):
+        if role == Qt.DisplayRole:
+            return self.headers[section] if orientation == Qt.Horizontal else str(section + 1)
+
+
 class MainWindow(QMainWindow):
     export_finished = pyqtSignal(str, str)
     transfer_progress = pyqtSignal(int)
@@ -540,6 +566,12 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
 
         self.reader = None
+        self.diagnostics = Diagnostics()
+        self.test_diagnostics = None
+        self.test_session = None
+        self.test_mode = "静置"
+        self.test_limits = (3., 3., 5.)
+        self.settings = QSettings("AHRS", "Diagnostics")
         self.save_enabled = False
         self.recording = None
         self.save_lock = threading.Lock()
@@ -806,7 +838,10 @@ class MainWindow(QMainWindow):
                 layout.addWidget(value_label, row, 1, Qt.AlignRight | Qt.AlignVCenter)
 
                 self.value_labels[key] = value_label
-                rows.append((name_label, value_label))
+                note = QLabel()
+                note.setWordWrap(True)
+                layout.addWidget(note, row, 2)
+                rows.append((name_label, value_label, note))
             self.field_rows.append(rows)
 
         for layout in (col1_layout, col2_layout, col3_layout):
@@ -864,20 +899,125 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.update_label, 1, Qt.AlignRight)
 
         main_layout.addLayout(status_layout)
+        bar = QHBoxLayout()
+        self.mode_box = QComboBox()
+        self.mode_box.addItems(["静置", "运动"])
+        bar.addWidget(self.mode_box)
+        self.limit_boxes = []
+        for axis in AXES:
+            bar.addWidget(QLabel(axis + "阈值"))
+            box = QDoubleSpinBox()
+            box.setRange(0.01, 100000)
+            box.setSuffix(" m")
+            bar.addWidget(box)
+            self.limit_boxes.append(box)
+            box.valueChanged.connect(self._set_limits)
+        self.mode_box.currentTextChanged.connect(self._load_limits)
+        self._load_limits(self.mode_box.currentText())
+        self.test_button = QPushButton("开始测验记录")
+        self.test_button.clicked.connect(self._toggle_test)
+        bar.addWidget(self.test_button)
+        self.test_export = QPushButton("导出测验 Excel")
+        self.test_export.setEnabled(False)
+        self.test_export.clicked.connect(self._export_test)
+        bar.addWidget(self.test_export)
+        review = QPushButton("导入文件回顾")
+        review.clicked.connect(self._review_test)
+        bar.addWidget(review)
+        main_layout.addLayout(bar)
+        self.test_status = QLabel()
+        main_layout.addWidget(self.test_status)
+
+    def _load_limits(self, mode):
+        for axis, box, default in zip(AXES, self.limit_boxes, (3., 3., 5.)):
+            box.blockSignals(True)
+            box.setValue(self.settings.value(mode + "/" + axis, default, type=float))
+            box.blockSignals(False)
+        self._set_limits()
+
+    def _set_limits(self):
+        with self.save_lock:
+            self.test_mode = self.mode_box.currentText()
+            self.test_limits = tuple(box.value() for box in self.limit_boxes)
+            self.diagnostics.previous = None
+            self.diagnostics.history.clear()
+        for axis, value in zip(AXES, self.test_limits):
+            self.settings.setValue(self.test_mode + "/" + axis, value)
+
+    def _toggle_test(self):
+        session = self.test_session
+        try:
+            with self.save_lock:
+                if session and session.active:
+                    session.close()
+                else:
+                    if self.reader is None:
+                        self.test_status.setText("请先连接串口")
+                        return
+                    session = RecordingSession(os.path.join(self._default_raw_dir(), "测验记录"))
+                    self.test_session = session
+                    self.test_diagnostics = Diagnostics()
+        except (OSError, ValueError) as error:
+            self.test_status.setText(str(error))
+            return
+        self._test_controls()
+
+    def _test_controls(self):
+        session = self.test_session
+        active = session and session.active
+        self.test_button.setText("停止测验记录" if active else "开始测验记录")
+        self.test_export.setEnabled(bool(session and session.count and not active))
+        for widget in [self.mode_box, *self.limit_boxes]:
+            widget.setEnabled(not active)
+        if session:
+            self.test_status.setText(session.error or str(session.path))
+
+    def _export_test(self):
+        try:
+            self.test_status.setText(str(self.test_session.export_excel()))
+        except Exception as error:
+            QMessageBox.warning(self, "测验导出失败", str(error))
+
+    def _review_test(self):
+        path, _ = QFileDialog.getOpenFileName(self, "回顾采集或测验记录", "",
+                                              "数据文件 (*.csv *.xlsx)")
+        if not path:
+            return
+        try:
+            rows = list(review_rows(path, self.test_mode, self.test_limits))
+            if not rows:
+                raise ValueError("文件没有数据行")
+        except Exception as error:
+            QMessageBox.warning(self, "无法读取记录", str(error))
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("测验回顾 — " + os.path.basename(path))
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f"共 {len(rows)} 帧"))
+        table = QTableView()
+        model = ReviewModel(rows, table)
+        table.setModel(model)
+        layout.addWidget(table)
+        dialog.resize(1100, 600)
+        dialog.exec_()
+
 
     def _configure_protocol_fields(self):
         is_t02 = self.protocol_combo.currentIndex() == 0
         groups = T02Parser.DISPLAY_GROUPS if is_t02 else self.legacy_display_groups
         self.value_labels.clear()
+        self.notes = {}
         for rows, fields in zip(self.field_rows, groups):
-            for index, (name_label, value_label) in enumerate(rows):
+            for index, (name_label, value_label, note) in enumerate(rows):
                 visible = index < len(fields)
+                note.clear()
                 name_label.setVisible(visible)
                 value_label.setVisible(visible)
                 if visible:
                     title, key = fields[index]
                     name_label.setText(title)
                     value_label.setText('--')
+                    self.notes[key] = note
                     self.value_labels[key] = value_label
         self.vendor_compat_check.setEnabled(not is_t02)
         self.vendor_compat_check.setToolTip('仅用于 EB90 二进制协议的弧度转角度')
@@ -958,6 +1098,9 @@ class MainWindow(QMainWindow):
         if result is not True:
             QMessageBox.critical(self, '连接失败', f'无法打开串口: {result}')
             return
+        self.diagnostics = Diagnostics()
+        for note in self.notes.values():
+            note.clear()
         self.reader = reader
         with self.data_lock:
             self.data_queue.clear()
@@ -972,6 +1115,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f'状态: 已连接 {port} @ {baud}，等待有效报文')
 
     def _set_connection_controls(self, connected):
+        if not connected and self.test_session and self.test_session.active:
+            self._toggle_test()
         self.connect_btn.setText('关闭串口' if connected else '打开串口')
         self.port_combo.setEnabled(not connected)
         self.baud_combo.setEnabled(not connected)
@@ -983,6 +1128,18 @@ class MainWindow(QMainWindow):
         valid = isinstance(data, dict) and 'error' not in data and 'frame_header' in data
         if valid:
             with self.save_lock:
+                stamp = now
+                if data.get("protocol") == "T02":
+                    stamp = data["gps_week"] * 604800 + data["gps_seconds"]
+                result = self.diagnostics.update(data, stamp, self.test_mode, self.test_limits)
+                data = dict(data, diagnostics=result)
+                if self.test_session and self.test_session.active:
+                    result = self.test_diagnostics.update(data, stamp, self.test_mode, self.test_limits)
+                    try:
+                        self.test_session.append({"接收时间": datetime.now().isoformat(timespec="milliseconds"),
+                                                  **self._build_save_record(data), **result})
+                    except (OSError, ValueError, RuntimeError):
+                        pass  # RecordingSession retains the error for the UI timer.
                 if self.save_enabled and self.recording:
                     try:
                         self.recording.append(self._build_save_record(data))
@@ -1015,6 +1172,8 @@ class MainWindow(QMainWindow):
                 self.rx_frame_count = 0
                 self.rx_frequency_start = now
             last_valid = self.last_valid_time
+        if self.test_session and self.test_session.error:
+            self._test_controls()
         if latest_data is not None:
             self._update_ui(latest_data)
             self.last_update_time = time.strftime('%H:%M:%S')
@@ -1103,6 +1262,10 @@ class MainWindow(QMainWindow):
         if data.get('type') == 'raw_hex':
             return
 
+        result = data.get("diagnostics", {})
+        for key, title in {**TYPES, **dict(zip(("longitude", "latitude", "alt"), AXES))}.items():
+            if key in self.notes:
+                self.notes[key].setText(result.get(title + ("统计" if key in TYPES else "判定"), ""))
         self.last_frame = data
         self._refresh_raw_preview()
         smooth = self.smoothing_check.isChecked()
@@ -1488,6 +1651,8 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 event.ignore()
                 return
+        if self.test_session and self.test_session.active:
+            self._toggle_test()
         self.timer.stop()
         event.accept()
 
